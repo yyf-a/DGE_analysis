@@ -1,0 +1,236 @@
+---
+title: "Limma-voom Notebook"
+output: html_notebook
+---
+# limma
+Limma methods are used to analysis microarry data. 
+
+## set-up
+The DEA analysis is conducted using Limma-voom packege, using the data stored in package breastCancerVDX.
+
+
+```{r}
+# load packages
+library(limma)
+library(EnhancedVolcano)
+library(edgeR)
+
+# load the data
+library(breastCancerVDX)
+```
+
+The `vdx` dataset from the breastCancerVDX package is an ExpressionSet of women diagnosed with breast cancer. It contains information about 22,000 genes and several variables including estrogen receptor (ER) status.
+
+```{r}
+data(vdx)
+vdx
+```
+## Design matrix
+The factor er is the ER(oestrogen receptors) status, ER+ and ER-, where the code 0 means negative and 1 positive estrogen receptor. 
+```{r}
+table(vdx$er)
+```
+```{r}
+#  define the comparison of interest (and the design of the experiment)
+design <- model.matrix(~ vdx$er) 
+```
+
+## DGE
+
+Now we do a standard limma model fit
+
+```{r}
+# fitting the linear model
+fit <- lmFit(vdx, design)
+
+# using emprical bayes model to borrow strenth across genes with similar expression level
+fit <- eBayes(fit)
+
+# lists the top DEG
+topTable(fit)
+```
+logFC provides the information of log fold change, but we need to decide if this is 1-0 (ie. ER+ vs ER-) or the reverse
+
+One method to do is check the reference level, which is the first level of the factor
+```{r}
+head(as.factor(vdx$er))
+```
+reference level is 0, thus the positive values means it is down-regulated in ER. The reference level of a factor can be changed using the `relevel()` function.
+
+The other method is calculate logFC by hand
+```{r}
+topTable(fit, n = 1)
+genename <- rownames(topTable(fit, n=1))
+typeMean <- tapply(exprs(vdx)[genename,], vdx$er, mean)
+typeMean["1"] - typeMean["0"]
+```
+This confirms the results. 
+
+other important parameters:
+- t: the t-statistic used to assess differential expression.
+- P.Value: the p-value for differential expression; this value is not adjusted for multiple testing.
+- adj.P.Val: the p-value adjusted for multiple testing. Different adjustment methods are available, the default is Benjamini-Horchberg.
+
+
+## plots
+Volcano plot can be use to visualize the genes that are differentially expressed at a given fold-change and p-value.
+```{r}
+volcanoplot(fit, coef=2, names = fit$genes$Gene.symbol, 
+            highlight = 5)
+```
+
+The graph will lookes better using package `EnhancedVolcano`
+
+```{r}
+toptable <- topTable(fit, n = Inf)
+
+EnhancedVolcano(toptable,
+    lab = toptable$Gene.symbol,
+    x = 'logFC',
+    y = 'P.Value')
+```
+Another state-of-the-art plot is MA-plot. It is used to check whether data are comparable among groups (i.e. normalization worked properly). This can be created using a function available in limma.
+```{r}
+limma::plotMA(fit, coef=2, main="ER+ vs ER- comparison")
+abline(h=0, col="red", lwd=2)
+```
+
+
+
+# limma-voom
+## set-up
+```{r}
+# load the data
+counts <- read.delim("all_counts.txt", row.names = 1)
+head(counts)
+```
+## proprocessing of the data
+```{r}
+dge <- DGEList(counts)
+
+```
+
+### filtering
+removing genes with low counts data because:
+- From a biological point of view, genes that not expressed at a biologically meaningful level in any condition are not of interest and are therefore best ignored. 
+- From a statistical point of view, removing low count genes allows the mean-variance relationship in the data to be estimated with greater reliability and also reduces the number of statistical tests that need to be carried out in downstream analyses looking at differential expression.
+
+```{r}
+keep.exprs <- filterByExpr(dge)
+dge.filt <- dge[keep.exprs,]
+dim(dge.filt)
+```
+### normalization
+```{r}
+# the normalization is finished by TMM in edgeR
+dge <- calcNormFactors(dge)
+```
+
+### design matrix
+Our experiment has two factors, cultivar (“C”, “I5”, or “I8”) and time (6 or 9)
+
+```{r}
+snames <- colnames(counts) # Sample names
+snames
+```
+
+```{r}
+cultivar <- substr(snames, 1, nchar(snames) - 2) 
+time <- substr(snames, nchar(snames) - 1, nchar(snames) - 1)
+cultivar
+```
+```{r}
+group <- interaction(cultivar, time)
+group
+```
+
+```{r}
+plotMDS(dge, col = as.numeric(group))
+```
+## voom transformation
+
+Because the varieties included in experimental sequencing, it is common practice to transform raw counts onto a scale that accounts for such library size differences. Popular transformations include counts per million (CPM), log2-counts per million (log-CPM), reads per kilobase of transcript per million (RPKM), and fragments per kilobase of transcript per million (FPKM). Here raw counts are converted log-CPM values using the voom function in limma package.
+
+
+```{r}
+mm <- model.matrix( ~ group)
+v <- voom(dge, design = mm, plot = TRUE)
+```
+
+It's clearly the filter process does perform well. We need to filter more. 
+
+```{r}
+cutoff <- 1
+drop <- which(apply(cpm(dge), 1, max) < cutoff)
+dge <- dge[-drop,] 
+dim(dge) # number of genes left
+```
+```{r}
+mm <- model.matrix( ~ group)
+v <- voom(dge, design = mm, plot = TRUE)
+```
+
+This fitted smoothed curve (red line) is used to obtain weights for each gene and sample that are passed into limma along with the log2 CPMs.
+
+
+## limma to identify the DEGs
+```{r}
+fit <- lmFit(v, mm)
+```
+
+
+### single factor
+Specify which groups to compare:
+
+Comparison between times 6 and 9 for cultivar I5
+```{r}
+contr <- makeContrasts(groupI5.9 - groupI5.6, levels = colnames(coef(fit)))
+contr
+```
+
+```{r}
+tmp <- contrasts.fit(fit, contr)
+tmp <- eBayes(fit)
+top.table <- topTable(tmp, sort.by = "none", n = Inf)
+head(top.table, 20)
+```
+Number of DEGs
+```{r}
+length(which(top.table$adj.P.Val < 0.05))
+```
+### two factors
+
+
+
+
+
+# source
+- https://rpubs.com/jrgonzalezISGlobal/transcriptomic_analyses
+- https://kasperdanielhansen.github.io/genbioconductor/html/limma.html
+
+
+```{r}
+#Create new model matrix:
+
+mm <- model.matrix(~cultivar*time)
+#We are specifying that model includes effects for cultivar, time, and the cultivar-time interaction (which allows the differences between cultivars to differ across time)
+
+colnames(mm)
+```
+
+```{r}
+y <- voom(dge, mm, plot = T)
+fit <- lmFit(y, mm)
+head(coef(fit))
+```
+
+
+# resource
+- https://ucdavis-bioinformatics-training.github.io/2018-June-RNA-Seq-Workshop/thursday/DE.html
+- https://rpubs.com/jrgonzalezISGlobal/transcriptomic_analyses
+
+
+
+
+
+
